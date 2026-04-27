@@ -1,4 +1,4 @@
-import re, os, json, requests, time, pykakasi
+import re, os, json, requests, time
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from tabulate import tabulate
@@ -6,7 +6,6 @@ from termcolor import colored
 import pygame
 from charset_normalizer import detect
 
-kks = pykakasi.kakasi()
 WIN_RATE_THRESHOLD = 0.8
 ODDS_MIN, ODDS_MAX = 1.1, 1.3
 SITE_IDS = [[36, "水沢"],[44, "大井"]]
@@ -18,30 +17,30 @@ YEAR, MONTH, DAY = TODAY.year, TODAY.month, TODAY.day
 JSON_PATH = rf"C:\Users\yakim\Documents\github\nar-keiba-monitor\datas\{MONTH:02d}{DAY:02d}.json"
 PIC_MP = r"C:\Users\yakim\Desktop\ALLDATA\MP3\fic.mp3"
 FTN_MP = r"C:\Users\yakim\Desktop\ALLDATA\MP3\futon.mp3"
-headers = ["No", "Horse", "WinOdds", "OddsMin", "OddsMax", "WinRate", "PastRanks"]
 
-print("\n","\n=== Program start ===\n")
+# ヘッダーを日本語化して視認性を向上
+headers = ["馬番", "馬名", "単勝", "複勝(下限)", "複勝(上限)", "複勝率(直近)", "過去着順"]
+
+def clear_console():
+    """コンソール画面をクリアしてダッシュボードのように見せる"""
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+print("\n=== Program start ===\n")
 
 def play_sound(path, volume=1.0):
     pygame.mixer.init()
     pygame.mixer.music.load(path)
-    pygame.mixer.music.set_volume(volume)  # 0.0 to 1.0
+    pygame.mixer.music.set_volume(volume)
     pygame.mixer.music.play()
-
-    # 再生が終わるまで待機
     while pygame.mixer.music.get_busy():
         pygame.time.Clock().tick(10)
 
 def countdown(sec):
     print("\n")
     for remaining in range(sec, 0, -1):
-        print(f"\rWaiting {remaining:2d} sec   ", end="", flush=True)
+        print(f"\r次の更新まで {remaining:2d} 秒お待ちください...   ", end="", flush=True)
         time.sleep(1)
-    print(" " * 30)
-
-def to_romaji(text):
-    result = kks.convert(text)
-    return ''.join([item['hepburn'] for item in result])
+    print("\r" + " " * 40 + "\r", end="", flush=True)
 
 def get_race_id(site_id: int, race_num: int) -> int:
     base_id = int(f"{YEAR:04d}{site_id:02d}{MONTH:02d}{DAY:02d}")
@@ -49,22 +48,14 @@ def get_race_id(site_id: int, race_num: int) -> int:
 
 def fetch_html(url: str):
     res = requests.get(url, headers=HEADERS, timeout=15)
-    # netkeiba (NAR) pages are commonly encoded in EUC-JP.
-    # Use it first to avoid mojibake in race text and horse names.
-    try:
-        res.content.decode("euc_jp")
-        res.encoding = "euc_jp"
-    except Exception:
-        enc = detect(res.content).get("encoding") or res.apparent_encoding or "utf-8"
-        res.encoding = enc
-    ret = BeautifulSoup(res.text, "html.parser")
-    return ret
+    html_text = res.content.decode("euc-jp", errors="ignore")
+
+    return BeautifulSoup(html_text, "html.parser")
 
 def extract_race_info(race_id: int):
     url = f"https://nar.netkeiba.com/race/shutuba_past.html?race_id={race_id}&rf=shutuba_submenu"
     soup = fetch_html(url)
 
-    # race start time / race rule
     time_tag = soup.select_one('div.RaceData01')
     if not time_tag:
         raise ValueError("No race data block")
@@ -72,19 +63,17 @@ def extract_race_info(race_id: int):
     race_text = time_tag.get_text(" ", strip=True)
     m = re.search(r'(\d{1,2})[:：](\d{2})\s*発走', race_text)
     if not m:
-        # Fallback for pages where decoding makes the "発走" token unreliable.
         m = re.search(r'(\d{1,2})[:：](\d{2})', race_text)
     if not m:
         raise ValueError("No race start time")
 
-    # Handle format variants like ダ1400m, ダ1,400m, 芝1200m
     rule_match = re.search(r'(ダ|芝)\s*[0-9,]{3,5}\s*m', race_text)
     rule = rule_match.group(0).replace(" ", "") if rule_match else "N/A"
 
     race_time = datetime(YEAR, MONTH, DAY, int(m.group(1)), int(m.group(2)))
-    # get horse ranks
     horse_data = {}
     has_excellent = False
+
     for tr in soup.select('tr.HorseList'):
         no_tag = tr.select_one('td.Waku')
         horse_no = no_tag.text.strip()
@@ -107,7 +96,6 @@ def extract_race_info(race_id: int):
 
 def extract_odds_info(race_id: int):
     url = f"https://nar.netkeiba.com/odds/index.html?race_id={race_id}&rf=race_submenu"
-    print(url)
     soup = fetch_html(url)
     odds_info = {}
 
@@ -117,6 +105,7 @@ def extract_odds_info(race_id: int):
         horse_no_tag = row.select_one("td.Waku")
         horse_name_tag = row.select_one("td.Horse_Name a")
         odds_tags = row.select("td.Odds span.Odds")
+
         if horse_no_tag and horse_name_tag and len(odds_tags) == 2:
             horse_no = horse_no_tag.text.strip()
             horse_name = horse_name_tag.text.strip()
@@ -124,17 +113,14 @@ def extract_odds_info(race_id: int):
             place_text = odds_tags[1].text.strip()
 
             if odds_text in ["取消", "返還"] or place_text in ["取消", "返還"]:
-                win_odds = None
-                odds_min = None
-                odds_max = None
+                win_odds = odds_min = odds_max = None
             else:
                 try:
                     win_odds = float(odds_text)
                     place_range = place_text.split(" - ")
                     odds_min = float(place_range[0])
                     odds_max = float(place_range[1])
-                except Exception as e:
-                    print(f"[ERROR parsing odds] Horse {horse_no}: {e}")
+                except Exception:
                     win_odds = odds_min = odds_max = None
 
             odds_info[horse_no] = {
@@ -145,14 +131,13 @@ def extract_odds_info(race_id: int):
             }
     return odds_info
 
-
 def build_daily_data():
     data = []
     for site_id, site_name in SITE_IDS:
         for race_num in range(1, 13):
             race_id = get_race_id(site_id, race_num)
             try:
-                race_time, horse_info,rule = extract_race_info(race_id)
+                race_time, horse_info, rule = extract_race_info(race_id)
                 data.append({
                     "race_datetime": race_time,
                     "race_id": race_id,
@@ -163,11 +148,10 @@ def build_daily_data():
                 })
                 print(f"Processed {site_name} {race_num}R at {race_time}")
             except Exception as e:
-                print(f"[ERROR] {site_name} {race_num}R: {e}")
+                pass # エラー出力が多すぎると見づらいためpassにするか、ロギングに変更
 
     data.sort(key=lambda x: x["race_datetime"])
 
-    # Create a copy for saving to JSON
     data_to_save = []
     for d in data:
         d_copy = d.copy()
@@ -175,18 +159,18 @@ def build_daily_data():
             d_copy["race_datetime"] = d_copy["race_datetime"].isoformat()
         data_to_save.append(d_copy)
 
-    # Save the string-converted copy
+    # フォルダが存在しない場合を考慮
+    os.makedirs(os.path.dirname(JSON_PATH), exist_ok=True)
     with open(JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(data_to_save, f, ensure_ascii=False, indent=4)
     print(f"Saved data to {JSON_PATH}")
     return data
 
-
-# Load JSON (fallback to fresh fetch when file is empty/stale)
+# Load JSON
 if os.path.exists(JSON_PATH):
     with open(JSON_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
-    print("Data loaded from JSON.", "\n")
+    print("Data loaded from JSON.\n")
     for d in data:
         d["race_datetime"] = datetime.fromisoformat(d["race_datetime"])
     if not data:
@@ -195,59 +179,73 @@ if os.path.exists(JSON_PATH):
 else:
     data = build_daily_data()
 
-
 def fetch_odds_periodically(race_id: int, target_time: datetime, detail):
     notified_5min = False
     notified_2min = False
+
     while True:
         now = datetime.now()
         now_time = now.time()
-        print(detail)
         time_to_start = (target_time - now).total_seconds()
+
         if not notified_5min and 0 < time_to_start <= 300:
             print("【Notify】Betting closes in 3 minutes.")
-            #play_sound(FTN_MP, volume=1)
             notified_5min = True
         if not notified_2min and 0 < time_to_start <= 120:
             print("【Notify】Betting closed.")
-            #play_sound(PIC_MP, volume=0.5)
             notified_2min = True
-
 
         if (target_time - timedelta(minutes=50)).time() < now_time < (target_time - timedelta(minutes=1)).time():
             odds_info = extract_odds_info(race_id)
             table = []
-            #print(odds_info)
-            # Filtering and displaying odds information
+
             for horse_no, odds in odds_info.items():
                 horse_info = next((d["horse_info"] for d in data if d["race_id"] == race_id), {})
                 win_rate = horse_info.get(horse_no, {}).get("win_rate", 0)
                 rank_ranks = horse_info.get(horse_no, {}).get("rank_ranks", [])
-                name_display = colored(to_romaji(odds['horse_name']), "red") if win_rate >= WIN_RATE_THRESHOLD and ODDS_MIN <= odds["odds_min"] <= ODDS_MAX else to_romaji(odds['horse_name'])
+
+                # 条件に合致するか判定
+                is_target = win_rate >= WIN_RATE_THRESHOLD and (odds["odds_min"] is not None and ODDS_MIN <= odds["odds_min"] <= ODDS_MAX)
+
+                # カタカナをそのまま使用、条件合致で赤字・太字
+                horse_name = odds['horse_name']
+                name_display = colored(horse_name, "red", attrs=["bold"]) if is_target else horse_name
+
+                # 数値のフォーマット（None対策）
+                win_odds_str = colored(f"{odds['win_odds']:.1f}", "cyan") if odds['win_odds'] else "-"
+                odds_min_str = colored(f"{odds['odds_min']:.1f}", "green") if odds['odds_min'] else "-"
+                odds_max_str = f"{odds['odds_max']:.1f}" if odds['odds_max'] else "-"
+
                 table.append([
                     int(horse_no),
                     name_display,
-                    colored(odds['win_odds'], "cyan"),
-                    colored(odds['odds_min'], "green"),
-                    odds['odds_max'],
-                    round(win_rate, 2),
+                    win_odds_str,
+                    odds_min_str,
+                    odds_max_str,
+                    f"{win_rate:.2f}",
                     ",".join(rank_ranks)
                 ])
-            print(tabulate(table, headers=headers, tablefmt="grid", floatfmt=".1f"))
+
+            clear_console()  # 画面をクリアして表を上書き更新する
+            print(f"現在時刻: {now.strftime('%H:%M:%S')} | 発走: {target_time.strftime('%H:%M')}")
+            print(detail)
+            print(tabulate(table, headers=headers, tablefmt="grid"))
             countdown(WAIT_SEC)
+
         elif now_time > (target_time - timedelta(minutes=3)).time():
-            print("Next race...")
-            countdown(WAIT_SEC)
+            print("\n次のレースへ移行します...")
+            countdown(5)
             break
         else:
-            print(f"Waiting...")
+            clear_console()
+            print(f"待機中... 発走時刻: {target_time.strftime('%H:%M')} (現在: {now.strftime('%H:%M:%S')})")
             countdown(WAIT_SEC)
 
 def find_next_race():
     now = datetime.now()
     future_races = [
         d for d in data
-        if d["race_datetime"] > now #and d["horse_info"].get("__has_excellent__", False)
+        if d["race_datetime"] > now
     ]
 
     print("\n=== Upcoming Races with Excellent Horses ===\n")
@@ -255,17 +253,19 @@ def find_next_race():
         print(f"{d['site_name']} {d['race_num']}R | {d['rule']} | {d['race_datetime'].strftime('%H:%M')}")
         for horse_no, info in d["horse_info"].items():
             if horse_no.startswith("__"):
-                continue  # 特殊キーはスキップ
+                continue
             if info.get("win_rate", 0) >= WIN_RATE_THRESHOLD:
                 past_ranks = info.get("rank_ranks", [])
                 past_ranks_str = ",".join(past_ranks) if past_ranks else "N/A"
-                print(f"  └ Excellent Horse: {horse_no} | PastRanks: {past_ranks_str}")
+                print(f"  └ 注目馬: {horse_no}番 | 過去着順: {past_ranks_str}")
 
-    print("\n=== Monitoring Next Race ===\n")
+    time.sleep(3)
+
     while future_races:
         next_race = min(future_races, key=lambda x: x["race_datetime"])
         race_time = next_race["race_datetime"]
-        detail = colored(f"{next_race['site_name']}{next_race['race_num']} | {next_race['rule']}", "yellow") + f" | {race_time.strftime('%H:%M')}"
+        detail = colored(f"■ {next_race['site_name']} {next_race['race_num']}R | {next_race['rule']}", "yellow", attrs=["bold"])
+
         fetch_odds_periodically(next_race["race_id"], race_time, detail)
 
         now = datetime.now()
@@ -275,9 +275,8 @@ def find_next_race():
         ]
 
         if not future_races:
-            print("No upcoming race with excellent horse.")
+            print("本日の監視対象レースは終了しました。")
             break
 
-
-#Main program
-find_next_race()
+if __name__ == "__main__":
+    find_next_race()
