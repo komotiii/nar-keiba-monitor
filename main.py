@@ -1,4 +1,4 @@
-import re, os, json, requests, time
+import re, os, json, requests, time, sys
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from tabulate import tabulate
@@ -6,17 +6,36 @@ from termcolor import colored
 import pygame
 from charset_normalizer import detect
 
-WIN_RATE_THRESHOLD = 0.8
-ODDS_MIN, ODDS_MAX = 1.1, 1.3
-SITE_IDS = [[36, "水沢"],[44, "大井"]]
-#笠松 投票締切時刻は、発走時刻の2分前です。
-WAIT_SEC = 15
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"}
+# ==========================================
+# 設定ファイルの読み込み
+# ==========================================
+CONFIG_FILE = "config.json"
+try:
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        config = json.load(f)
+except FileNotFoundError:
+    print(f"[エラー] 設定ファイル '{CONFIG_FILE}' が見つかりません。")
+    sys.exit(1)
+
+# 変数のマッピング
+WIN_RATE_THRESHOLD = config["thresholds"]["win_rate"]
+ODDS_MIN = config["thresholds"]["odds_min"]
+ODDS_MAX = config["thresholds"]["odds_max"]
+SITE_IDS = config["site_ids"]
+WAIT_SEC = config["wait_sec"]
+HEADERS = config["headers"]
+
+# パスと日付の設定
 TODAY = datetime.now()
 YEAR, MONTH, DAY = TODAY.year, TODAY.month, TODAY.day
-JSON_PATH = rf"C:\Users\yakim\Documents\github\nar-keiba-monitor\datas\{MONTH:02d}{DAY:02d}.json"
-PIC_MP = r"C:\Users\yakim\Desktop\ALLDATA\MP3\fic.mp3"
-FTN_MP = r"C:\Users\yakim\Desktop\ALLDATA\MP3\futon.mp3"
+
+DATA_DIR = config["paths"]["data_dir"]
+# data_dirとファイル名(MMDD.json)を結合
+JSON_PATH = os.path.join(DATA_DIR, f"{MONTH:02d}{DAY:02d}.json")
+
+PIC_MP = config["paths"]["audio_pic"]
+FTN_MP = config["paths"]["audio_ftn"]
+# ==========================================
 
 # ヘッダーを日本語化して視認性を向上
 headers = ["馬番", "馬名", "単勝", "複勝(下限)", "複勝(上限)", "複勝率(直近)", "過去着順"]
@@ -28,12 +47,15 @@ def clear_console():
 print("\n=== Program start ===\n")
 
 def play_sound(path, volume=1.0):
-    pygame.mixer.init()
-    pygame.mixer.music.load(path)
-    pygame.mixer.music.set_volume(volume)
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.time.Clock().tick(10)
+    try:
+        pygame.mixer.init()
+        pygame.mixer.music.load(path)
+        pygame.mixer.music.set_volume(volume)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+    except Exception as e:
+        print(f"音声の再生に失敗しました: {e}")
 
 def countdown(sec):
     print("\n")
@@ -49,7 +71,6 @@ def get_race_id(site_id: int, race_num: int) -> int:
 def fetch_html(url: str):
     res = requests.get(url, headers=HEADERS, timeout=15)
     html_text = res.content.decode("euc-jp", errors="ignore")
-
     return BeautifulSoup(html_text, "html.parser")
 
 def extract_race_info(race_id: int):
@@ -148,7 +169,7 @@ def build_daily_data():
                 })
                 print(f"Processed {site_name} {race_num}R at {race_time}")
             except Exception as e:
-                pass # エラー出力が多すぎると見づらいためpassにするか、ロギングに変更
+                pass
 
     data.sort(key=lambda x: x["race_datetime"])
 
@@ -159,7 +180,6 @@ def build_daily_data():
             d_copy["race_datetime"] = d_copy["race_datetime"].isoformat()
         data_to_save.append(d_copy)
 
-    # フォルダが存在しない場合を考慮
     os.makedirs(os.path.dirname(JSON_PATH), exist_ok=True)
     with open(JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(data_to_save, f, ensure_ascii=False, indent=4)
@@ -190,9 +210,11 @@ def fetch_odds_periodically(race_id: int, target_time: datetime, detail):
 
         if not notified_5min and 0 < time_to_start <= 300:
             print("【Notify】Betting closes in 3 minutes.")
+            play_sound(FTN_MP, volume=1)
             notified_5min = True
         if not notified_2min and 0 < time_to_start <= 120:
             print("【Notify】Betting closed.")
+            play_sound(PIC_MP, volume=0.5)
             notified_2min = True
 
         if (target_time - timedelta(minutes=50)).time() < now_time < (target_time - timedelta(minutes=1)).time():
@@ -204,14 +226,11 @@ def fetch_odds_periodically(race_id: int, target_time: datetime, detail):
                 win_rate = horse_info.get(horse_no, {}).get("win_rate", 0)
                 rank_ranks = horse_info.get(horse_no, {}).get("rank_ranks", [])
 
-                # 条件に合致するか判定
                 is_target = win_rate >= WIN_RATE_THRESHOLD and (odds["odds_min"] is not None and ODDS_MIN <= odds["odds_min"] <= ODDS_MAX)
 
-                # カタカナをそのまま使用、条件合致で赤字・太字
                 horse_name = odds['horse_name']
                 name_display = colored(horse_name, "red", attrs=["bold"]) if is_target else horse_name
 
-                # 数値のフォーマット（None対策）
                 win_odds_str = colored(f"{odds['win_odds']:.1f}", "cyan") if odds['win_odds'] else "-"
                 odds_min_str = colored(f"{odds['odds_min']:.1f}", "green") if odds['odds_min'] else "-"
                 odds_max_str = f"{odds['odds_max']:.1f}" if odds['odds_max'] else "-"
@@ -226,7 +245,7 @@ def fetch_odds_periodically(race_id: int, target_time: datetime, detail):
                     ",".join(rank_ranks)
                 ])
 
-            clear_console()  # 画面をクリアして表を上書き更新する
+            clear_console()
             print(f"現在時刻: {now.strftime('%H:%M:%S')} | 発走: {target_time.strftime('%H:%M')}")
             print(detail)
             print(tabulate(table, headers=headers, tablefmt="grid"))
