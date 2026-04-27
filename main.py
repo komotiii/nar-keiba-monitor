@@ -8,13 +8,13 @@ import pygame
 kks = pykakasi.kakasi()
 WIN_RATE_THRESHOLD = 0.8
 ODDS_MIN, ODDS_MAX = 1.1, 1.3
-SITE_IDS = [[42, "浦和"],[48, "名古屋"]]
+SITE_IDS = [[36, "水沢"],[44, "大井"]]
 #笠松 投票締切時刻は、発走時刻の2分前です。
 WAIT_SEC = 15
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"}
 TODAY = datetime.now()
 YEAR, MONTH, DAY = TODAY.year, TODAY.month, TODAY.day
-JSON_PATH = rf"C:\Users\yakim\OneDrive - 筑波大学\Code\=Fix=\Keiba\datas\{MONTH:02d}{DAY:02d}.json"
+JSON_PATH = rf"C:\Users\yakim\Documents\github\nar-keiba-monitor\datas\{MONTH:02d}{DAY:02d}.json"
 PIC_MP = r"C:\Users\yakim\Desktop\ALLDATA\MP3\fic.mp3"
 FTN_MP = r"C:\Users\yakim\Desktop\ALLDATA\MP3\futon.mp3"
 headers = ["No", "Horse", "WinOdds", "OddsMin", "OddsMax", "WinRate", "PastRanks"]
@@ -55,13 +55,21 @@ def fetch_html(url: str):
 def extract_race_info(race_id: int):
     url = f"https://nar.netkeiba.com/race/shutuba_past.html?race_id={race_id}&rf=shutuba_submenu"
     soup = fetch_html(url)
-    #race start time
+
+    # race start time / race rule
     time_tag = soup.select_one('div.RaceData01')
-    m = re.search(r'(\d{1,2}):(\d{2})発走', time_tag.get_text())
-    rule_match = re.search(r'(ダ|芝)\d{3,4}m', time_tag.get_text())
-    rule =  rule_match.group(0)
+    if not time_tag:
+        raise ValueError("No race data block")
+
+    race_text = time_tag.get_text(" ", strip=True)
+    m = re.search(r'(\d{1,2})[:：](\d{2})\s*発走', race_text)
     if not m:
-        raise ValueError("No race")
+        raise ValueError("No race start time")
+
+    # Handle format variants like ダ1400m, ダ1,400m, 芝1200m
+    rule_match = re.search(r'(ダ|芝)\s*[0-9,]{3,5}\s*m', race_text)
+    rule = rule_match.group(0).replace(" ", "") if rule_match else "N/A"
+
     race_time = datetime(YEAR, MONTH, DAY, int(m.group(1)), int(m.group(2)))
     # get horse ranks
     horse_data = {}
@@ -77,7 +85,7 @@ def extract_race_info(race_id: int):
         ]
         top3 = sum(1 for r in ranks if r in ['1', '2', '3'])
         wr = top3 / max(5, len(ranks)) if ranks else 0
-        if wr >= 0.8:
+        if wr >= WIN_RATE_THRESHOLD:
             has_excellent = True
         horse_data[horse_no] = {
             "rank_ranks": ranks,
