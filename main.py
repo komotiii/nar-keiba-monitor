@@ -49,8 +49,14 @@ def get_race_id(site_id: int, race_num: int) -> int:
 
 def fetch_html(url: str):
     res = requests.get(url, headers=HEADERS, timeout=15)
-    enc = detect(res.content).get("encoding") or res.apparent_encoding or "utf-8"
-    res.encoding = enc
+    # netkeiba (NAR) pages are commonly encoded in EUC-JP.
+    # Use it first to avoid mojibake in race text and horse names.
+    try:
+        res.content.decode("euc_jp")
+        res.encoding = "euc_jp"
+    except Exception:
+        enc = detect(res.content).get("encoding") or res.apparent_encoding or "utf-8"
+        res.encoding = enc
     ret = BeautifulSoup(res.text, "html.parser")
     return ret
 
