@@ -1,113 +1,161 @@
-import requests
+import re,os,json,requests,time
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime,timedelta
+from charset_normalizer import detect
 
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-}
+WIN_RATE_THRESHOLD = 0.1
+ODDS_MIN, ODDS_MAX = 1.0, 5
+SITE_IDS = [[30, "門別"], [44, "大井"], [47, "笠松"], [50, "園田"]]
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"}
+TODAY = datetime.now()
+YEAR, MONTH, DAY = TODAY.year, TODAY.month, TODAY.day
+JSON_PATH = rf"C:\Users\yakim\OneDrive - 筑波大学\Unification\Keiba\datas\{MONTH:02d}{DAY:02d}.json"
 
-# 競馬場IDとその名前のマッピング
-site_ids = [[44,"大井"],[46,"金沢"],[47,"笠松"],[50,"園田"]]  # 複数の競馬場ID
-all_picked_horses = []
+print("\n","--- Program start ---")
 
-today = datetime.now()
-year = today.year
-month = today.month
-day = today.day
+def get_race_id(site_id: int, race_num: int) -> int:
+    base_id = int(f"{YEAR:04d}{site_id:02d}{MONTH:02d}{DAY:02d}")
+    return base_id * 100 + race_num
 
-for site_id, site_name in site_ids:
-    base_id = int(f"{year:04d}{site_id:02d}{month:02d}{day:02d}")
 
-    for race_num in range(1, 13):  # レース番号（例: 第8～12R）
-        race_id = base_id * 100 + race_num
+def fetch_html(url: str):
+    res = requests.get(url, headers=HEADERS)
+    res.encoding = res.apparent_encoding
+    ret = BeautifulSoup(res.text, "html.parser")
+    return ret
 
-        url_odds = f"https://nar.netkeiba.com/odds/index.html?race_id={race_id}&rf=race_submenu"
-        url_past = f"https://nar.netkeiba.com/race/shutuba_past.html?race_id={race_id}&rf=shutuba_submenu"
+def extract_race_info(race_id: int):
+    url = f"https://nar.netkeiba.com/race/shutuba_past.html?race_id={race_id}&rf=shutuba_submenu"
+    soup = fetch_html(url)
+    #race start time
+    time_tag = soup.select_one('div.RaceData01')
+    m = re.search(r'(\d{1,2}):(\d{2})発走', time_tag.get_text())
+    if not m:
+        raise ValueError("No race")
+    race_time = datetime(YEAR, MONTH, DAY, int(m.group(1)), int(m.group(2)))
+    # get horse ranks
+    horse_data = {}
+    has_excellent = False
+    for tr in soup.select('tr.HorseList'):
+        no_tag = tr.select_one('td.Waku')
+        horse_no = no_tag.text.strip()
+        ranks = [
+            span.text.strip()
+            for td in tr.select('td.Past')
+            for span in [td.select_one('div.Data_Item div.Data01 span.Num')]
+            if span
+        ]
+        top3 = sum(1 for r in ranks if r in ['1', '2', '3'])
+        wr = top3 / max(5, len(ranks)) if ranks else 0
+        if wr >= 0.8:
+            has_excellent = True
+        horse_data[horse_no] = {
+            "rank_ranks": ranks,
+            "win_rate": wr
+        }
+    horse_data["__has_excellent__"] = has_excellent
+    return race_time, horse_data
 
-        # ========== Step 1: オッズページ ==========
-        res_odds = requests.get(url_odds, headers=headers)
-        res_odds.encoding = res_odds.apparent_encoding
-        soup_odds = BeautifulSoup(res_odds.text, "html.parser")
+def extract_odds_info(race_id: int):
+    url = f"https://nar.netkeiba.com/odds/index.html?race_id={race_id}&rf=race_submenu"
+    soup = fetch_html(url)
+    odds_info = {}
 
-        odds_rows = soup_odds.select("table.RaceOdds_HorseList_Table tr")[1:]
-        horse_info_by_number = {}
+    # Select rows from the odds table, similar to the first script
+    odds_rows = soup.select("table.RaceOdds_HorseList_Table tr")[1:]
 
-        for row in odds_rows:
-            horse_no_tag = row.select_one("td.Waku")
-            horse_name_tag = row.select_one("td.Horse_Name a")
-            odds_tags = row.select("td.Odds span.Odds")
-            print(len(odds_tags))
-            if horse_no_tag and horse_name_tag and len(odds_tags) == 2:
-                horse_no = horse_no_tag.text.strip()
-                horse_name = horse_name_tag.text.strip()
-                fukusho_odds = odds_tags[1].text.strip()
-
-                horse_info_by_number[horse_no] = {
-                    "horse_no": horse_no,
-                    "name": horse_name,
-                    "fukusho_odds": fukusho_odds,
-                    "past_ranks": []
-                }
-
-        # ========== Step 2: 過去レースページ ==========
-        res_past = requests.get(url_past, headers=headers)
-        res_past.encoding = res_past.apparent_encoding
-        soup_past = BeautifulSoup(res_past.text, "html.parser")
-
-        horse_rows_past = soup_past.select('tr.HorseList')
-
-        for horse_block in horse_rows_past:
-            horse_no_tag = horse_block.select_one('td.Waku')
-            if not horse_no_tag:
-                continue
+    for row in odds_rows:
+        horse_no_tag = row.select_one("td.Waku")
+        horse_name_tag = row.select_one("td.Horse_Name a")
+        odds_tags = row.select("td.Odds span.Odds")
+        if horse_no_tag and horse_name_tag and len(odds_tags) == 2:
             horse_no = horse_no_tag.text.strip()
-
-            ranks = []
-            past_tds = horse_block.select('td.Past')
-            for past_td in past_tds:
-                data_item = past_td.select_one('div.Data_Item')
-                if data_item:
-                    num_span = data_item.select_one('div.Data01 span.Num')
-                    if num_span:
-                        rank = num_span.text.strip()
-                        ranks.append(rank)
-
-            if horse_no in horse_info_by_number:
-                horse_info_by_number[horse_no]["past_ranks"] = ranks
+            target_odds = odds_tags[1].text.strip()
+            odds_range = target_odds.split(" - ")
+            odds = float(odds_range[0])
+            odds_info[horse_no] = {
+                "horse_no": horse_no,
+                "target_odds": odds
+            }
+    return odds_info
 
 
-        # ========== Step 3: フィルタ ==========
-        picked_horses = []
-
-        for horse in horse_info_by_number.values():
-            horse_no = horse["horse_no"]
-            horse_name = horse["name"]
-            odds_text = horse["fukusho_odds"]
-            past_ranks = horse["past_ranks"]
-
-            if odds_text in ["取消", "除外"]:
-                continue
+#Load JSON
+if os.path.exists(JSON_PATH):
+    with open(JSON_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print("Data loaded from JSON.","\n")
+else:
+    data = []
+    for site_id, site_name in SITE_IDS:
+        for race_num in range(1, 13):
+            race_id = get_race_id(site_id, race_num)
             try:
-                if "-" in odds_text:
-                    odds_min = float(odds_text.split("-")[0].strip())
-                else:
-                    odds_min = float(odds_text.strip())
-            except ValueError:
-                continue
+                race_time, horse_info = extract_race_info(race_id)
+                data.append({
+                    "race_datetime": race_time.strftime("%H:%M"),
+                    "race_id": race_id,
+                    "site_name": site_name,
+                    "race_num": race_num,
+                    "horse_info": horse_info
+                })
+                print(f"Processed {site_name} {race_num}R at {race_time}")
+            except Exception as e:
+                print(f"[ERROR] {site_name} {race_num}R: {e}")
 
-            if 1.0 <= odds_min <= 1.3:
-                past5 = past_ranks[:5]
-                top3_count = sum(1 for r in past5 if r in ['1', '2', '3'])
-                if top3_count >= 4:
-                    picked_horses.append([horse_no, horse_name, odds_min, past5])
+    data.sort(key=lambda x: x["race_datetime"])
+    with open(JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+    print(f"Saved data to {JSON_PATH}")
 
-        # ↓ここで場所とレース番号を表示
-        print(f"\n--- {site_name} 競馬場 - レース番号 {race_num} ---")
-        for horse in picked_horses:
-            print(horse)
+def fetch_odds_periodically(race_id: int, target_time: datetime):
+    while True:
+        now = datetime.now()
+        now_time = now.time()
+        if (target_time - timedelta(minutes=40)).time() < now_time < (target_time - timedelta(minutes=1)).time():
+            print(f"Fetching odds for race ID {race_id}", "\n")
+            odds_info = extract_odds_info(race_id)
+            #print(odds_info)
+            for horse_no, odds in odds_info.items():
+                if ODDS_MIN <= odds["target_odds"] <= ODDS_MAX:  # Access target_odds here
+                    print(f"{horse_no} - {odds['target_odds']} : {odds['target_odds']:.1f}")
+            time.sleep(15)
+        elif now_time > (target_time - timedelta(minutes=3)).time():
+            print("Time passed, stopping fetch.")
+            break
+        else:
+            print("Waiting for appropriate time...")
+            time.sleep(10)
 
-        # まとめ用にも保存（必要なら）
-        all_picked_horses.append({
-            "race_id": race_id,
-            "picked_horses": picked_horses
-        })
+def find_next_race():
+    now = datetime.now()
+    future_races = [
+        d for d in data
+        if datetime.combine(now.date(), datetime.strptime(d["race_datetime"], "%H:%M").time()) > now
+        and d["horse_info"].get("__has_excellent__", False)
+    ]
+
+    while future_races:
+        # Fetch the next race with the earliest time
+        next_race = min(future_races, key=lambda x: datetime.strptime(x["race_datetime"], "%H:%M"))
+
+        print(f"Next race with excellent horse: {next_race['site_name']} {next_race['race_num']}R at {next_race['race_datetime']}")
+        race_time = datetime.strptime(next_race["race_datetime"], "%H:%M")
+
+        # Fetch odds for the race
+        fetch_odds_periodically(next_race["race_id"], race_time)
+
+        # Remove the processed race from the future_races list
+        future_races = [
+            d for d in data
+            if datetime.combine(now.date(), datetime.strptime(d["race_datetime"], "%H:%M").time()) > now
+            and d["horse_info"].get("__has_excellent__", False)
+            and d["race_id"] != next_race["race_id"]
+        ]
+
+        # To avoid infinite loop, check if there are no more races with excellent horses
+        if not future_races:
+            print("No upcoming race with excellent horse.")
+            break
+#Main program
+find_next_race()
