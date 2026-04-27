@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from tabulate import tabulate
 from termcolor import colored
 import pygame
+from charset_normalizer import detect
 
 kks = pykakasi.kakasi()
 WIN_RATE_THRESHOLD = 0.8
@@ -47,8 +48,9 @@ def get_race_id(site_id: int, race_num: int) -> int:
     return base_id * 100 + race_num
 
 def fetch_html(url: str):
-    res = requests.get(url, headers=HEADERS)
-    res.encoding = res.apparent_encoding
+    res = requests.get(url, headers=HEADERS, timeout=15)
+    enc = detect(res.content).get("encoding") or res.apparent_encoding or "utf-8"
+    res.encoding = enc
     ret = BeautifulSoup(res.text, "html.parser")
     return ret
 
@@ -63,6 +65,9 @@ def extract_race_info(race_id: int):
 
     race_text = time_tag.get_text(" ", strip=True)
     m = re.search(r'(\d{1,2})[:：](\d{2})\s*発走', race_text)
+    if not m:
+        # Fallback for pages where decoding makes the "発走" token unreliable.
+        m = re.search(r'(\d{1,2})[:：](\d{2})', race_text)
     if not m:
         raise ValueError("No race start time")
 
@@ -135,14 +140,7 @@ def extract_odds_info(race_id: int):
     return odds_info
 
 
-#Load JSON
-if os.path.exists(JSON_PATH):
-    with open(JSON_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    print("Data loaded from JSON.", "\n")
-    for d in data:
-        d["race_datetime"] = datetime.fromisoformat(d["race_datetime"])
-else:
+def build_daily_data():
     data = []
     for site_id, site_name in SITE_IDS:
         for race_num in range(1, 13):
@@ -175,6 +173,21 @@ else:
     with open(JSON_PATH, "w", encoding="utf-8") as f:
         json.dump(data_to_save, f, ensure_ascii=False, indent=4)
     print(f"Saved data to {JSON_PATH}")
+    return data
+
+
+# Load JSON (fallback to fresh fetch when file is empty/stale)
+if os.path.exists(JSON_PATH):
+    with open(JSON_PATH, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print("Data loaded from JSON.", "\n")
+    for d in data:
+        d["race_datetime"] = datetime.fromisoformat(d["race_datetime"])
+    if not data:
+        print("Cached JSON is empty. Rebuilding from web...\n")
+        data = build_daily_data()
+else:
+    data = build_daily_data()
 
 
 def fetch_odds_periodically(race_id: int, target_time: datetime, detail):
