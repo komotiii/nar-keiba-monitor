@@ -6,9 +6,9 @@ from termcolor import colored
 import pygame
 from charset_normalizer import detect
 
-# ==========================================
+# =========================================%
 # 設定ファイルの読み込み
-# ==========================================
+# =========================================%
 CONFIG_FILE = "config.json"
 try:
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
