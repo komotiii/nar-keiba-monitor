@@ -43,8 +43,9 @@ pip install -r requirements.txt
         "odds_max": 4.0
     },
     "site_ids": [
-        [36, "水沢"],
-        [42, "浦和"]
+        [44, "大井"],
+        [46, "金沢"],
+        [47, "笠松"]
     ],
     "wait_sec": 30,
     "paths": {
